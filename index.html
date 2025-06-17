@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2D FFT Image Processor</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f4f8; /* Light gray background */
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            min-height: 100vh;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            max-width: 1200px;
+            width: 100%;
+            background-color: #ffffff;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+        }
+        .card {
+            background-color: #ffffff;
+            border-radius: 10px;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.05);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+            width: 100%;
+            max-width: 500px; /* Limit width of individual cards */
+        }
+        canvas {
+            border: 1px solid #e2e8f0;
+            background-color: #f8fafc;
+            border-radius: 8px;
+            max-width: 100%; /* Ensure canvas scales down on smaller screens */
+            height: auto; /* Maintain aspect ratio */
+        }
+        .message-box {
+            background-color: #e0f2f7; /* Light blue */
+            color: #2c5282; /* Dark blue text */
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 10px;
+            text-align: center;
+            font-size: 0.95em;
+            width: 100%;
+            max-width: 500px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        }
+        .canvas-section {
+            display: flex;
+            flex-wrap: wrap; /* Allow canvases to wrap on smaller screens */
+            justify-content: center;
+            gap: 20px;
+            width: 100%;
+        }
+
+        @media (min-width: 768px) {
+            .canvas-section {
+                flex-wrap: nowrap; /* Prevent wrapping on larger screens */
+            }
+            .card {
+                max-width: none; /* Remove max-width on larger screens */
+                flex: 1; /* Distribute space evenly */
+            }
+        }
+    </style>
+</head>
+<body class="selection:bg-blue-200">
+    <div class="container">
+        <h1 class="text-4xl font-extrabold text-gray-900 mb-6 text-center">2D FFT Image Processor</h1>
+
+        <p class="text-gray-700 text-lg text-center mb-8">
+            Press <kbd class="px-2 py-1 bg-gray-200 rounded-md text-sm font-semibold text-gray-800">Ctrl+V</kbd> (or <kbd class="px-2 py-1 bg-gray-200 rounded-md text-sm font-semibold text-gray-800">Cmd+V</kbd> on Mac) anywhere on this page to paste an image from your clipboard.
+        </p>
+
+        <div id="messageBox" class="message-box hidden"></div>
+
+        <div class="canvas-section">
+            <div class="card">
+                <h2 class="text-2xl font-bold text-gray-800">Original Image</h2>
+                <canvas id="originalCanvas"></canvas>
+                <div class="text-sm text-gray-500 mt-2" id="originalImageInfo"></div>
+            </div>
+
+            <div class="card">
+                <h2 class="text-2xl font-bold text-gray-800">FFT Magnitude</h2>
+                <canvas id="fftCanvas"></canvas>
+                <div class="text-sm text-gray-500 mt-2" id="fftImageInfo"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Get canvas elements and their contexts
+        const originalCanvas = document.getElementById('originalCanvas');
+        const originalCtx = originalCanvas.getContext('2d');
+        const fftCanvas = document.getElementById('fftCanvas');
+        const fftCtx = fftCanvas.getContext('2d');
+
+        const originalImageInfo = document.getElementById('originalImageInfo');
+        const fftImageInfo = document.getElementById('fftImageInfo');
+        const messageBox = document.getElementById('messageBox');
+
+        // Set initial canvas sizes (will be updated on image load)
+        const CANVAS_SIZE = 512; // Default size, will resize to power of 2
+        originalCanvas.width = CANVAS_SIZE;
+        originalCanvas.height = CANVAS_SIZE;
+        fftCanvas.width = CANVAS_SIZE;
+        fftCanvas.height = CANVAS_SIZE;
+
+        /**
+         * Displays a message in the message box.
+         * @param {string} message - The message to display.
+         * @param {string} type - 'info', 'error', 'success' for styling.
+         */
+        function showMessage(message, type = 'info') {
+            messageBox.textContent = message;
+            messageBox.className = 'message-box'; // Reset classes
+            messageBox.classList.remove('hidden');
+
+            switch (type) {
+                case 'error':
+                    messageBox.classList.add('bg-red-100', 'text-red-800');
+                    break;
+                case 'success':
+                    messageBox.classList.add('bg-green-100', 'text-green-800');
+                    break;
+                case 'info':
+                default:
+                    messageBox.classList.add('bg-blue-100', 'text-blue-800');
+                    break;
+            }
+        }
+
+        /** Hides the message box. */
+        function hideMessage() {
+            messageBox.classList.add('hidden');
+        }
+
+        /**
+         * Clamps a value between a minimum and maximum.
+         * @param {number} value
+         * @param {number} min
+         * @param {number} max
+         * @returns {number}
+         */
+        function clamp(value, min, max) {
+            return Math.max(min, Math.min(value, max));
+        }
+
+        /**
+         * Represents a complex number.
+         */
+        class Complex {
+            constructor(re, im = 0) {
+                this.re = re;
+                this.im = im;
+            }
+
+            add(other) {
+                return new Complex(this.re + other.re, this.im + other.im);
+            }
+
+            sub(other) {
+                return new Complex(this.re - other.re, this.im - other.im);
+            }
+
+            mul(other) {
+                return new Complex(
+                    this.re * other.re - this.im * other.im,
+                    this.re * other.im + this.im * other.re
+                );
+            }
+
+            mag() {
+                return Math.sqrt(this.re * this.re + this.im * this.im);
+            }
+        }
+
+        /**
+         * Performs a 1D Fast Fourier Transform (FFT) on an array of complex numbers.
+         * Assumes input array length is a power of 2.
+         * @param {Complex[]} x - Array of complex numbers.
+         * @param {boolean} inverse - True for inverse FFT, false for forward FFT.
+         * @returns {Complex[]} Transformed array.
+         */
+        function fft(x, inverse = false) {
+            const N = x.length;
+            if (N <= 1) return x;
+
+            // Divide
+            const even = [];
+            const odd = [];
+            for (let i = 0; i < N / 2; i++) {
+                even.push(x[i * 2]);
+                odd.push(x[i * 2 + 1]);
+            }
+
+            const Q = fft(even, inverse);
+            const R = fft(odd, inverse);
+
+            // Combine
+            const y = new Array(N);
+            for (let k = 0; k < N / 2; k++) {
+                let twiddleFactor;
+                if (inverse) {
+                    twiddleFactor = new Complex(Math.cos(2 * Math.PI * k / N), Math.sin(2 * Math.PI * k / N));
+                } else {
+                    twiddleFactor = new Complex(Math.cos(-2 * Math.PI * k / N), Math.sin(-2 * Math.PI * k / N));
+                }
+
+                y[k] = Q[k].add(twiddleFactor.mul(R[k]));
+                y[k + N / 2] = Q[k].sub(twiddleFactor.mul(R[k]));
+            }
+
+            // If inverse FFT, divide by N
+            if (inverse) {
+                for (let i = 0; i < N; i++) {
+                    y[i].re /= N;
+                    y[i].im /= N;
+                }
+            }
+
+            return y;
+        }
+
+        /**
+         * Pads or resizes image data to the nearest power of 2.
+         * @param {ImageData} imageData - The original ImageData object.
+         * @returns {object} An object containing the new dimensions (width, height) and the padded grayscale pixel array.
+         */
+        function getPaddedGrayscaleImage(imageData) {
+            const originalWidth = imageData.width;
+            const originalHeight = imageData.height;
+
+            // Find the smallest power of 2 greater than or equal to the max dimension
+            const size = Math.max(originalWidth, originalHeight);
+            let paddedDim = 1;
+            while (paddedDim < size) {
+                paddedDim <<= 1; // Bit shift left for power of 2
+            }
+
+            // Create a new grayscale array for the padded image
+            const grayscalePixels = new Array(paddedDim * paddedDim).fill(0);
+
+            for (let y = 0; y < originalHeight; y++) {
+                for (let x = 0; x < originalWidth; x++) {
+                    const i = (y * originalWidth + x) * 4; // Index for RGBA
+                    // Convert to grayscale using luminance method (BT.709 approximation)
+                    const r = imageData.data[i];
+                    const g = imageData.data[i + 1];
+                    const b = imageData.data[i + 2];
+                    const gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                    grayscalePixels[y * paddedDim + x] = gray / 255.0; // Normalize to 0-1
+                }
+            }
+            return {
+                width: paddedDim,
+                height: paddedDim,
+                pixels: grayscalePixels
+            };
+        }
+
+        /**
+         * Performs 2D FFT on a grayscale image.
+         * @param {number[]} pixels - 1D array of grayscale pixel values (0-1).
+         * @param {number} width - Width of the image (must be power of 2).
+         * @param {number} height - Height of the image (must be power of 2).
+         * @returns {Complex[][]} 2D array of complex numbers representing the FFT result.
+         */
+        function fft2d(pixels, width, height) {
+            const rows = [];
+            for (let y = 0; y < height; y++) {
+                const row = [];
+                for (let x = 0; x < width; x++) {
+                    row.push(new Complex(pixels[y * width + x]));
+                }
+                rows.push(fft(row)); // FFT each row
+            }
+
+            const cols = new Array(width).fill(0).map(() => new Array(height));
+            for (let x = 0; x < width; x++) {
+                const col = [];
+                for (let y = 0; y < height; y++) {
+                    col.push(rows[y][x]);
+                }
+                const transformedCol = fft(col); // FFT each column of the row-transformed data
+                for (let y = 0; y < height; y++) {
+                    cols[x][y] = transformedCol[y];
+                }
+            }
+
+            // Transpose back for easier access as [row][col]
+            const fftResult = new Array(height).fill(0).map(() => new Array(width));
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    fftResult[y][x] = cols[x][y];
+                }
+            }
+            return fftResult;
+        }
+
+        /**
+         * Shifts the zero-frequency component to the center of the FFT result.
+         * @param {Complex[][]} fftData - 2D array of complex numbers.
+         * @returns {Complex[][]} Shifted FFT data.
+         */
+        function fftshift(fftData) {
+            const height = fftData.length;
+            const width = fftData[0].length;
+            const shiftedData = new Array(height).fill(0).map(() => new Array(width));
+
+            const halfHeight = height / 2;
+            const halfWidth = width / 2;
+
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    let newY = (y + halfHeight) % height;
+                    let newX = (x + halfWidth) % width;
+                    shiftedData[newY][newX] = fftData[y][x];
+                }
+            }
+            return shiftedData;
+        }
+
+        /**
+         * Processes the pasted image: draws it, performs FFT, and displays the result.
+         * @param {ImageBitmap} imageBitmap - The image to process.
+         */
+        async function processImage(imageBitmap) {
+            hideMessage();
+            showMessage('Processing image...', 'info');
+
+            // Set original canvas dimensions to match image bitmap, then clamp to reasonable size
+            const displayWidth = Math.min(imageBitmap.width, 800);
+            const displayHeight = Math.min(imageBitmap.height, 800);
+
+            originalCanvas.width = displayWidth;
+            originalCanvas.height = displayHeight;
+            originalCtx.clearRect(0, 0, originalCanvas.width, originalCanvas.height);
+            originalCtx.drawImage(imageBitmap, 0, 0, originalCanvas.width, originalCanvas.height);
+            originalImageInfo.textContent = `Dimensions: ${imageBitmap.width}x${imageBitmap.height}px`;
+
+            try {
+                // Draw image to a temporary canvas for accurate pixel data extraction
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = imageBitmap.width;
+                tempCanvas.height = imageBitmap.height;
+                const tempCtx = tempCanvas.getContext('2d');
+                tempCtx.drawImage(imageBitmap, 0, 0);
+
+                const imageData = tempCtx.getImageData(0, 0, imageBitmap.width, imageBitmap.height);
+
+                // Get grayscale padded image data
+                const { width: paddedWidth, height: paddedHeight, pixels: grayscalePixels } = getPaddedGrayscaleImage(imageData);
+
+                showMessage(`Performing 2D FFT on a ${paddedWidth}x${paddedHeight} image...`, 'info');
+
+                // Perform 2D FFT
+                const fftResult = fft2d(grayscalePixels, paddedWidth, paddedHeight);
+
+                // Shift the zero-frequency component to the center
+                const shiftedFFT = fftshift(fftResult);
+
+                // Calculate magnitude and find max for normalization
+                let maxMagnitude = 0;
+                const magnitudes = new Array(paddedHeight).fill(0).map(() => new Array(paddedWidth));
+                for (let y = 0; y < paddedHeight; y++) {
+                    for (let x = 0; x < paddedWidth; x++) {
+                        const mag = shiftedFFT[y][x].mag();
+                        magnitudes[y][x] = Math.log(1 + mag); // Log scale for better visualization
+                        if (magnitudes[y][x] > maxMagnitude) {
+                            maxMagnitude = magnitudes[y][x];
+                        }
+                    }
+                }
+
+                // Render FFT magnitude to canvas
+                fftCanvas.width = paddedWidth;
+                fftCanvas.height = paddedHeight;
+                const fftImageData = fftCtx.createImageData(paddedWidth, paddedHeight);
+                const data = fftImageData.data;
+
+                for (let y = 0; y < paddedHeight; y++) {
+                    for (let x = 0; x < paddedWidth; x++) {
+                        const pixelVal = (magnitudes[y][x] / maxMagnitude) * 255;
+                        const i = (y * paddedWidth + x) * 4;
+                        data[i] = pixelVal;       // R
+                        data[i + 1] = pixelVal;   // G
+                        data[i + 2] = pixelVal;   // B
+                        data[i + 3] = 255;        // A
+                    }
+                }
+                fftCtx.putImageData(fftImageData, 0, 0);
+                fftImageInfo.textContent = `Processed dimensions: ${paddedWidth}x${paddedHeight}px (padded to power of 2)`;
+                showMessage('FFT processing complete!', 'success');
+
+            } catch (error) {
+                console.error("Error during image processing:", error);
+                showMessage(`Error processing image: ${error.message}. Please try again with a different image.`, 'error');
+            }
+        }
+
+        /**
+         * Event listener for paste events.
+         * @param {ClipboardEvent} event - The paste event.
+         */
+        document.addEventListener('paste', async (event) => {
+            const items = event.clipboardData.items;
+            let imageFound = false;
+
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image') !== -1) {
+                    const blob = items[i].getAsFile();
+                    if (blob) {
+                        imageFound = true;
+                        showMessage('Pasting image...', 'info');
+                        try {
+                            const imageBitmap = await createImageBitmap(blob);
+                            processImage(imageBitmap);
+                        } catch (error) {
+                            console.error("Failed to create ImageBitmap:", error);
+                            showMessage('Could not load image from clipboard. Make sure it\'s a valid image.', 'error');
+                        }
+                    }
+                    break; // Process only the first image found
+                }
+            }
+
+            if (!imageFound) {
+                showMessage('No image found in clipboard. Please copy an image first.', 'info');
+            }
+        });
+
+        // Initial message on page load
+        window.onload = () => {
+            showMessage('Welcome! Copy an image to your clipboard and paste it here.', 'info');
+            // Clear canvases
+            originalCtx.clearRect(0, 0, originalCanvas.width, originalCanvas.height);
+            fftCtx.clearRect(0, 0, fftCanvas.width, fftCanvas.height);
+            originalCtx.fillStyle = '#f8fafc';
+            originalCtx.fillRect(0, 0, originalCanvas.width, originalCanvas.height);
+            fftCtx.fillStyle = '#f8fafc';
+            fftCtx.fillRect(0, 0, fftCanvas.width, fftCanvas.height);
+            originalCtx.font = '20px Inter';
+            originalCtx.textAlign = 'center';
+            originalCtx.fillStyle = '#cbd5e1';
+            originalCtx.fillText('Paste image here', originalCanvas.width / 2, originalCanvas.height / 2);
+            fftCtx.font = '20px Inter';
+            fftCtx.textAlign = 'center';
+            fftCtx.fillStyle = '#cbd5e1';
+            fftCtx.fillText('FFT result will appear here', fftCanvas.width / 2, fftCanvas.height / 2);
+        };
+    </script>
+</body>
+</html>
